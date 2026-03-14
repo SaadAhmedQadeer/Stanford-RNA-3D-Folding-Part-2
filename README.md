@@ -54,8 +54,8 @@ Competition: https://www.kaggle.com/competitions/stanford-rna-3d-folding-2
 
 ---
 
-**Step 4 — Write requirements.txt**
-```
+## requirements
+
 torch>=2.0.0
 biopython>=1.81
 scipy>=1.10.0
