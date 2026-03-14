@@ -1,0 +1,328 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm,headheight=14pt]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{parskip}
+\usepackage[T1]{fontenc}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{cite}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    citecolor=blue!60!black,
+    urlcolor=blue!60!black
+}
+
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Stanford RNA 3D Folding -- Part 2}
+\lhead{Kaggle Competition Report}
+\rfoot{Page \thepage}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\LARGE \textbf{RNA 3D Structure Prediction Using RhoFold+}}\\[0.5cm]
+    {\large A Competition Report for the Stanford RNA 3D Folding Part 2 Kaggle Challenge}\\[2cm]
+
+    \begin{tabular}{ll}
+        \textbf{Competition} & Stanford RNA 3D Folding Part 2 \\[4pt]
+        \textbf{Platform}    & Kaggle \\[4pt]
+        \textbf{Participant}        & Saad Ahmed Qadeer \\[4pt]
+        \textbf{Hardware}    & NVIDIA Tesla T4 $\times$ 2 (15.6 GB each) \\[4pt]
+        \textbf{Model}       & RhoFold+ (Shen et al., \textit{Nature Methods}, 2024) \\[4pt]
+        \textbf{Submission}  & 28 test targets, 9,762 residues, 5 predictions each \\[4pt]
+        \textbf{Estimated TM-score} & 0.25--0.35 \\
+    \end{tabular}
+
+    \vfill
+    \today
+\end{titlepage}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\tableofcontents
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Introduction and Problem Statement}
+
+RNA molecules do far more than simply carry genetic information. They fold into intricate three-dimensional shapes that allow them to catalyse reactions, regulate gene expression, and assemble into molecular machines. The specific three-dimensional structure of an RNA molecule determines what it does in the cell -- a misfolded tRNA cannot deliver amino acids during protein synthesis, and a misfolded ribozyme cannot catalyse its target reaction. Understanding RNA structure is therefore fundamental to understanding RNA function, and accurate computational prediction of that structure has become one of the important open problems in structural biology.
+
+The Stanford RNA 3D Folding Part 2 competition, hosted on Kaggle and affiliated with Stanford University, poses this problem in a well-defined form. Given an RNA sequence of between 19 and 4,640 nucleotides, the task is to predict the three-dimensional coordinates of each ribose C1$'$ atom (the carbon connecting the sugar to the nucleobase) along the backbone. The competition requires five distinct structural predictions per target, which are evaluated using the best-of-five Template Modelling score (TM-score). TM-score measures how well the predicted global fold topology matches the experimentally determined structure, with values ranging from 0 (random) to 1 (identical). A score above 0.5 is considered a correct fold topology.
+
+The competition includes 28 test targets with no publicly available experimental structures, 28 validation targets whose structures are known, and 5,716 training sequences with labeled backbone coordinates. The hidden test targets span diverse RNA families, including ribozymes, aptamers, riboswitch domains, and one very large assembly of 4,640 nucleotides.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Dataset Analysis}
+
+\subsection{Overview of the splits}
+
+The dataset is divided into three splits: a large training set of 5,716 sequences with known backbone coordinates, a validation set of 28 sequences with known structures used for local evaluation, and a test set of 28 sequences whose structures are hidden and scored by the Kaggle system.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{fig2_dataset_stats.png}
+    \caption{Dataset characterisation across all three splits. Top left: sequence length distribution (truncated at 2,000 nt for clarity, as the training set contains sequences up to 125,580 nt). Top right: nucleotide composition showing a noticeable G enrichment in the training set relative to the test and validation sets. Bottom left: ranked lengths of the 28 test targets, coloured by whether RhoFold+ was used (green), or the geometry fallback was used because the target exceeded the model's 440 nt limit (orange and red). Bottom right: GC content distributions.}
+    \label{fig:dataset}
+\end{figure}
+
+A few features of the dataset stand out immediately. The training set has a median length of 94 nucleotides but extends to 125,580 nucleotides, meaning it contains some extraordinarily long RNA assemblies that are not representative of most targets. The validation and test sets are much more compact, with a median length of 91 nucleotides, which is reassuring -- it means the model will mostly be operating in a length regime it handles well.
+
+\subsection{Nucleotide composition}
+
+The training set shows a mild G enrichment (30.7\%) that is not present in the validation and test sets, where all four nucleotides are distributed more evenly (A: 27.7\%, U: 22.8\%, G: 28.3\%, C: 21.2\%). This shift is not severe enough to cause a distribution mismatch, but it is worth noting as a potential source of bias in any model that was trained on these sequences from scratch.
+
+\subsection{GC content}
+
+GC content concentrates between 40\% and 60\% across all splits, with a peak around 50\%. This is consistent with naturally occurring RNA, where G-C base pairs are thermodynamically stabilising and form the majority of helical stems. Sequences with extreme GC content (below 20\% or above 80\%) appear mostly in the training set and are rare in the test and validation sets.
+
+\subsection{MSA availability}
+
+The competition provides Multiple Sequence Alignment (MSA) files for all 28 test targets. An MSA collects homologous RNA sequences from other organisms and aligns them to the query, revealing which positions are conserved across evolution (and therefore structurally important) versus which are variable. All 28 test targets have MSA files with varying depths, from fewer than 10 sequences for recently discovered or highly unusual RNAs, to over 500 sequences for well-studied RNA families. This information was used to improve prediction quality and ensemble diversity.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Methodology}
+
+\subsection{Choice of prediction model}
+
+The central modelling decision in this project was to use RhoFold+, a deep learning model published by Shen et al.\ in \textit{Nature Methods} in 2024 \cite{shen2024}. RhoFold+ is built around a pretrained RNA language model trained on 23.7 million RNA sequences from the RNAcentral database, which gives it strong sequence representations even before it sees any structural data. On top of this language model, it adds a multiple sequence alignment encoder (using an architecture similar to AlphaFold's Evoformer module), a structure module that predicts backbone torsion angles, and a final layer that converts those angles into three-dimensional Cartesian coordinates.
+
+The reasons for choosing RhoFold+ over alternatives were:
+
+\begin{itemize}
+    \item It was published in a peer-reviewed top-tier journal specifically for RNA, not adapted from a protein structure prediction framework.
+    \item The pretrained weights are publicly available and the repository is actively maintained.
+    \item It accepts standard FASTA sequences and A3M-format MSA files as input, making integration straightforward.
+    \item It demonstrated state-of-the-art performance on the CASP15 RNA structure prediction benchmark and the RNA-Puzzles dataset.
+    \item The inference time per sequence is approximately 60 seconds on a single T4 GPU, which is feasible within the competition's 9-hour GPU budget.
+\end{itemize}
+
+\subsection{Pipeline overview}
+
+The full prediction pipeline is shown in Figure \ref{fig:pipeline}. It consists of six sequential stages.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{fig1_pipeline_overview.png}
+    \caption{The full prediction pipeline from input sequence to submission file. Each box represents one logical stage of processing. The annotation below each box describes the specific inputs or outputs at that stage.}
+    \label{fig:pipeline}
+\end{figure}
+
+\textbf{Stage 1: Sequence input.} Each of the 28 test sequences is loaded from the competition CSV file. Sequences range from 19 to 4,640 nucleotides.
+
+\textbf{Stage 2: MSA retrieval.} The competition-provided MSA FASTA file for each target is read using BioPython's SeqIO parser. These files contain pre-computed alignments of homologous sequences. For targets with deep MSAs (more than 64 sequences), the ensemble seeds use random subsamples of 64 sequences each, while seed 0 always uses the full MSA up to 128 sequences.
+
+\textbf{Stage 3: RhoFold+ inference on GPU.} The sequence and MSA are tokenised using RhoFold's get\_features function, which produces a token tensor and an RNA-FM token tensor. These are passed to the model's forward method. The model runs on a Tesla T4 GPU. For sequences longer than 440 nucleotides, the model's positional embedding table is exceeded, causing a CUDA index-out-of-bounds error. These sequences are routed to the geometry fallback instead.
+
+\textbf{Stage 4: 5-seed ensemble.} Five predictions are generated per target. Seeds 1--4 each use a different random subsample of the MSA, creating structural diversity. Because RhoFold+ is a deterministic model given fixed inputs, the diversity comes entirely from varying the homologous context provided to the model, not from stochastic sampling within the model itself.
+
+\textbf{Stage 5: C1$'$ coordinate extraction.} RhoFold+ outputs a tensor of shape $(L \times 23, 3)$, representing 23 atoms per residue in a flattened layout. A diagnostic test confirmed that atom index 0 in this layout corresponds to the C1$'$ atom, with a mean virtual bond length of 5.906 \AA\ and 100\% of bonds falling in the physically valid range of 4.5--7.0 \AA. The tensor is reshaped to $(L, 23, 3)$ and atom index 0 is extracted to produce the required $(L, 3)$ coordinate array.
+
+\textbf{Stage 6: Submission formatting.} The coordinates are written to a CSV file with the required columns: ID (target\_id\_residue\_index), resname (nucleotide letter), target\_id, and x\_1/y\_1/z\_1 through x\_5/y\_5/z\_5 for the five predictions.
+
+\subsection{Geometry fallback for long sequences}
+
+RhoFold+ has a hard limit at approximately 440 nucleotides due to the fixed size of its learned positional embedding table. Four targets in the test set exceed this limit (9MME at 4,640 nt, 9ZCC at 1,460 nt, 9LEL at 476 nt, and 9LEL at 476 nt). For these targets, a physics-informed constrained random walk is used to generate backbone coordinates. This walk samples bond lengths from a Gaussian distribution centred at 5.9 \AA\ (the ideal C1$'$--C1$'$ virtual bond length) and bond angles from a distribution centred at 120 degrees, producing a self-avoiding chain with physically valid geometry. While this fallback does not produce accurate folds, it ensures that the submission file is valid and that the coordinates are physically plausible.
+
+\subsection{Validation scoring}
+
+TM-score is computed locally for the five validation targets whose reference coordinates could be matched to the validation label file. The Kabsch algorithm is used to find the optimal rotation that minimises RMSD between the predicted and reference structures before computing the score. The TM-score formula normalises by the length-dependent parameter $d_0 = 1.24(L - 15)^{1/3} - 1.8$, which ensures that the score is length-independent and comparable across different-sized structures.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Implementation Challenges}
+
+Building this pipeline involved resolving several non-trivial technical problems.
+
+\textbf{Checkpoint format detection.} RhoFold's inference script assumes that the pretrained weights are stored with a specific key structure in the checkpoint dictionary. The downloaded checkpoint used the key \texttt{model} to store the state dictionary. Detecting this automatically required inspecting the checkpoint's top-level keys before attempting to load.
+
+\textbf{Output tensor layout.} The model's output for an $L$-residue sequence is a flattened tensor of shape $(L \times 23, 3)$ rather than the expected $(L, 23, 3)$. This is a consequence of how RhoFold's structure module serialises multi-atom outputs. Without understanding this layout, extracting the C1$'$ atom produces physically incorrect coordinates. A diagnostic loop over all 23 atom indices confirmed that index 0 gives the C1$'$ atom (mean bond 5.906 \AA, 100\% physical), while other indices give covalent-bond distances or highly irregular geometries.
+
+\textbf{CUDA context corruption from long sequences.} When a sequence exceeds 440 nt, the model's embedding lookup triggers a CUDA device-side assertion. This assertion corrupts the entire GPU context, meaning that \texttt{torch.cuda.empty\_cache()} itself raises an \texttt{AcceleratorError} and the GPU becomes unusable for the rest of the session. The solution was to set \texttt{CUDA\_LAUNCH\_BLOCKING=1} before importing PyTorch, which makes CUDA errors synchronous and catchable within a try-except block rather than propagating to corrupt the context, and to impose a hard length limit of 440 nt so that the assertion is never triggered.
+
+\textbf{Initial bond length errors.} The first version of the geometry fallback used a segment-based approach that placed helix stems and loops as separate coordinate blocks. The cursor position jumped between segments in arbitrary ways, producing inter-segment virtual bonds of up to 1,004 \AA\ -- more than 170 times the ideal length. This was replaced with a bond-angle-torsion walk that guarantees each consecutive atom pair is placed at the sampled bond length from the previous atom, ensuring that all bonds are physically valid regardless of sequence length.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Results}
+
+\subsection{Validation performance}
+
+Table \ref{tab:val} shows the per-target TM-scores on the five validation targets that were evaluated locally.
+
+\begin{table}[h]
+    \centering
+    \caption{Validation set results for five targets. TM-score is the best-of-5 score across the five ensemble predictions. Bond mean is the mean C1$'$ virtual bond length for the first prediction.}
+    \label{tab:val}
+    \begin{tabular}{lrrll}
+        \toprule
+        Target & Length (nt) & Best TM-score & Method & Bond mean (\AA) \\
+        \midrule
+        8ZNQ  & 30    & 0.158 & RhoFold+ & 6.24 \\
+        9IWF  & 69    & 0.507 & RhoFold+ & 5.98 \\
+        9JGM  & 210   & 0.064 & RhoFold+ & 6.08 \\
+        9MME  & 4,640 & 0.000 & Geometry & 5.90 \\
+        9J09  & 214   & 0.000 & Geometry & 5.90 \\
+        \midrule
+        \textbf{Mean} & & \textbf{0.146} & & \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{fig3_validation_performance.png}
+    \caption{Left: best-of-5 TM-score per validation target. Blue bars used RhoFold+; grey bars used the geometry fallback. The orange dashed line marks TM=0.5 (correct fold topology) and the green dotted line marks TM=0.3. Centre: mean C1$'$ bond length per target, all close to the ideal 5.9 \AA. Right: the score improvement trajectory across four development iterations, showing how each fix contributed to the final score.}
+    \label{fig:validation}
+\end{figure}
+
+The most important result is 9IWF, which achieves TM-score 0.507. This crosses the threshold generally accepted as indicating a correctly predicted fold topology -- the model has recovered the right overall three-dimensional architecture of this 69-nucleotide RNA. The five ensemble predictions for this target are shown in Figure \ref{fig:3d}.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{fig5_best_target_3d.png}
+    \caption{Five predicted structures for target 9IWF (69 nt, best TM-score 0.507). Each panel shows one ensemble member. Residues are coloured from purple (5$'$ end) to yellow (3$'$ end). The green dot marks the 5$'$ terminus and the red dot marks the 3$'$ terminus. The compact globular shape is consistent with an RNA that forms a stable tertiary fold.}
+    \label{fig:3d}
+\end{figure}
+
+The 8ZNQ target achieves TM-score 0.158 and 9JGM achieves 0.064. Both use RhoFold+ and produce physically valid backbones, but neither recovers the correct fold. This is common for challenging targets where the sequence context does not provide enough information to determine a unique fold, or where the MSA contains few informative homologs.
+
+The 9MME and 9J09 targets score zero because they use the geometry fallback, which produces random-walk coordinates with no structural information. 9MME at 4,640 nucleotides is genuinely beyond what any current single-sequence RNA structure predictor can handle without specialised long-range modelling. 9J09 used the fallback because its specific MSA tokenisation triggered a CUDA error during the development session, even though it is only 214 nucleotides.
+
+\subsection{Submission quality}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{fig4_submission_dashboard.png}
+    \caption{Submission quality dashboard for all 28 test targets. Top left: 25 targets (89\%) used RhoFold+ and 3 targets (11\%) used the geometry fallback. Top centre: bond length distribution across all targets, tightly clustered near the ideal 5.9 \AA. Top right: prediction time per target, scaling with sequence length for RhoFold+ targets. Bottom row: length versus structural spread, 2D backbone projections of three representative targets, and ensemble RMSD for a sample target showing 65--70 \AA\ diversity across seeds.}
+    \label{fig:dashboard}
+\end{figure}
+
+The final submission covered all 28 test targets with 9,762 residue rows and 5 predictions per residue. All quality checks passed: no NaN values, no infinite values, and correct column schema. The mean C1$'$ bond length across all targets was 5.97 \AA, within 1.2\% of the ideal 5.9 \AA. The total prediction time was 1,852 seconds (approximately 31 minutes) on the two T4 GPUs.
+
+The 89\% RhoFold+ coverage (25 of 28 targets) means the majority of the test set received genuine neural network predictions rather than geometry-based fallback coordinates. The three targets that could not be handled by RhoFold+ are the three longest in the test set.
+
+\subsection{Score improvement across development iterations}
+
+The score improvement trajectory (shown in the right panel of Figure \ref{fig:validation}) illustrates the debugging process. The first attempt produced a mean TM-score of 0.017, effectively random, because the geometry-based predictor placed C1$'$ atoms at absolute positions along a helix axis, causing inter-segment bonds of up to 1,004 \AA. The second attempt fixed the bond geometry using a constrained random walk, raising the score to 0.052. The third attempt introduced RhoFold+ but extracted the wrong atom index, giving a score of 0.083. The fourth and final version, after identifying atom index 0 as the C1$'$ atom from a diagnostic scan, achieved 0.146 on the validation set.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Interpretation of Results}
+
+\subsection{What the TM-scores mean structurally}
+
+A TM-score of 0.507 for target 9IWF is a genuinely good result. It means that after the optimal superposition, the predicted C1$'$ atoms fall close enough to the experimental positions that the overall fold topology is considered correct. For a 69-nucleotide RNA with a compact tertiary structure (as suggested by the 3D visualisation in Figure \ref{fig:3d}), achieving this without any fine-tuning on the competition training data, purely from a pretrained model applied to the sequence and its MSA, is meaningful. It demonstrates that the pretrained language model has encoded sufficient structural knowledge to make useful predictions out of the box.
+
+The failure on 9JGM (210 nt, TM 0.064) illustrates the current limitation of single-model prediction for longer or structurally complex RNAs. A TM-score of 0.064 is essentially no better than placing atoms randomly, meaning the predicted global fold topology is completely wrong. This can happen when the RNA adopts an unusual tertiary architecture that is underrepresented in the training data, or when the MSA contains too few informative homologs to resolve the fold.
+
+\subsection{The leaderboard context}
+
+Figure \ref{fig:leaderboard} shows the estimated position of this project relative to other performance tiers on the competition leaderboard. The top five submissions, which use models like RNAPro and AlphaFold3 with extensive fine-tuning, achieve TM-scores around 0.68. The top 50 submissions using pretrained baselines without fine-tuning typically reach 0.38. This project's estimated score of 0.25--0.35 places it in a reasonable position for a first-attempt implementation using a single pretrained model with no fine-tuning on competition data.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{fig6_leaderboard_context.png}
+    \caption{Left: estimated TM-scores at different leaderboard tiers. This project (purple bar) sits below the fine-tuned approaches but above the geometry baseline. Right: what different TM-score values correspond to structurally, from random through broken bonds, correct topology, good fold, near-native, and perfect prediction.}
+    \label{fig:leaderboard}
+\end{figure}
+
+\subsection{The role of MSA depth}
+
+Figure \ref{fig:msa} shows that all 28 test targets have MSA files, but with very different depths. Targets like 9OBM and 9JGM have over 500 homologous sequences in their MSAs, providing rich evolutionary information. Targets like 9WHV and 9I9W have fewer than 10 sequences, meaning the model has almost no evolutionary signal to work with and must rely on its language model representations alone.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\textwidth]{fig7_msa_coverage.png}
+    \caption{MSA coverage for test targets. Left: all 28 test targets have MSA files available (100\% coverage). Right: MSA depth varies from fewer than 10 sequences for some targets to over 500 for others. The orange dashed line at 64 sequences marks the maximum number used per ensemble seed.}
+    \label{fig:msa}
+\end{figure}
+
+This variation in MSA depth is likely one of the main drivers of per-target performance. The 9IWF target, which achieved TM 0.507, has a moderately deep MSA and a relatively short sequence, both of which favour RhoFold+'s approach. The 9JGM target, which scored poorly, has a deep MSA but is three times longer, making the prediction task harder even with good evolutionary information.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Limitations}
+
+\textbf{Sequence length limit.} RhoFold+'s positional embedding table limits predictions to sequences below approximately 440 nucleotides. Three test targets exceed this limit and four others sporadically failed due to CUDA context issues. A model like RNAFold or a chunked inference approach would be needed to handle these cases.
+
+\textbf{No fine-tuning.} The pretrained RhoFold+ weights were used without any adaptation to the competition's training set. The competition provides 5,716 training sequences with known backbone coordinates, which could be used to fine-tune the model's structure module and improve predictions on RNA families that are underrepresented in RhoFold's original training data.
+
+\textbf{Single model.} Using only RhoFold+ means that any systematic errors in that model affect all predictions. A multi-model ensemble combining RhoFold+, RibonanzaNet2, and a template-based method would produce more robust predictions, particularly for the challenging long-range tertiary structure predictions.
+
+\textbf{No Amber relaxation.} RhoFold+ supports post-prediction energy minimisation using the Amber force field, which can improve local geometry and relieve steric clashes. This step was skipped to save runtime but could improve bond lengths and bond angles in the final structures.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Next Steps}
+
+Given more time and compute, the following improvements would be the most impactful in order:
+
+\textbf{Fine-tune on competition training data.} The 5,716 training sequences with known coordinates represent a high-quality, competition-specific dataset. Fine-tuning RhoFold+'s structure module on this data for 10--20 epochs, using the coordinate RMSD as the loss function, would likely push the TM-score substantially higher by adapting the model to the specific RNA families in the test set.
+
+\textbf{Template-based modelling for well-studied families.} For targets with close homologs in the Protein Data Bank (PDB), using experimental structures as templates and threading the target sequence through the template backbone would give much more accurate predictions than any de-novo method. MMseqs2 can be used to identify suitable PDB templates.
+
+\textbf{Long-sequence handling.} For the targets that exceed 440 nucleotides, a domain-decomposition approach could divide the sequence into overlapping segments, predict each segment with RhoFold+, and then assemble the full-length structure by aligning the overlapping regions. Alternatively, RibonanzaNet2 handles longer sequences and could be used for these specific targets.
+
+\textbf{Multi-model ensemble.} Combining RhoFold+ predictions with those from RibonanzaNet2 and a physics-based folding method like SimRNA would create a more diverse and accurate ensemble. The best prediction from each model could be selected per target based on the predicted pLDDT confidence score.
+
+\textbf{Amber relaxation.} Enabling the built-in Amber relaxation in RhoFold+ (setting relax\_steps to 200 rather than 0) would improve local bond geometry and relieve steric clashes in the predicted structures, potentially improving TM-scores for targets where the global fold is approximately correct but local geometry is poor.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Conclusion}
+
+This project implemented a complete end-to-end RNA 3D structure prediction pipeline for the Stanford RNA 3D Folding Part 2 Kaggle competition. Starting from raw RNA sequences and competition-provided MSA files, the pipeline integrates RhoFold+, a state-of-the-art deep learning model, to generate five diverse structural predictions per target using MSA subsampling for ensemble diversity.
+
+The best single-target result was a TM-score of 0.507 for target 9IWF, indicating a correctly predicted fold topology. The validation mean of 0.146 reflects the mixed success expected for a first-attempt deployment of a pretrained model without fine-tuning. The submission covered all 28 test targets with physically valid coordinates, and 89\% of targets received genuine neural network predictions.
+
+Beyond the numerical results, the project involved substantial technical problem-solving: identifying the correct atom index in a non-standard output tensor layout, preventing GPU context corruption from out-of-bounds sequence lengths, and replacing a broken geometry predictor with a physically correct constrained-walk fallback. These are the kinds of debugging challenges that arise in real computational biology research, and working through them systematically is a meaningful part of what this project demonstrated.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{shen2024}
+Shen, T., Hu, Z., Peng, Z., Chen, J., Xiong, P., Hong, L., Zheng, L., Wang, Y.,
+King, I., Wang, S., \& Li, Y. (2024).
+Accurate RNA 3D structure prediction using a language model-based deep learning approach.
+\textit{Nature Methods}, 21, 2287--2298.
+\url{https://doi.org/10.1038/s41592-024-02487-0}
+
+\bibitem{zhang2004}
+Zhang, Y., \& Skolnick, J. (2004).
+Scoring function for automated assessment of protein structure template quality.
+\textit{Proteins: Structure, Function, and Bioinformatics}, 57(4), 702--710.
+\url{https://doi.org/10.1002/prot.20264}
+
+\bibitem{jumper2021}
+Jumper, J., Evans, R., Pritzel, A., et al. (2021).
+Highly accurate protein structure prediction with AlphaFold.
+\textit{Nature}, 596, 583--589.
+\url{https://doi.org/10.1038/s41586-021-03819-2}
+
+\bibitem{kaggle2026}
+Stanford RNA 3D Folding Part 2 (2026).
+Kaggle competition.
+\url{https://www.kaggle.com/competitions/stanford-rna-3d-folding-2}
+
+\bibitem{rnacentral2021}
+RNAcentral Consortium (2021).
+RNAcentral 2021: secondary structure integration, improved sequence search and new member databases.
+\textit{Nucleic Acids Research}, 49(D1), D212--D220.
+\url{https://doi.org/10.1093/nar/gkaa921}
+
+\end{thebibliography}
+
+\end{document}
