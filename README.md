@@ -1,4 +1,4 @@
-# RNA 3D Structure Prediction
+# Standford AI Research :  RNA 3D Structure Prediction
 
 End-to-end pipeline for predicting RNA tertiary structure from sequence,
 built for the Stanford RNA 3D Folding Part 2 Kaggle competition (2026).
